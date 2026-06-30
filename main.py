@@ -64,7 +64,7 @@ def sanitize_filename(name):
 
 
 def capture_audio_url(short_url):
-    """使用 DrissionPage 访问链接，从页面/JS中提取音频 URL"""
+    """使用 DrissionPage 访问链接，从页面/JS中提取音频 URL 和封面 URL"""
     print('[浏览器] 正在启动 Chrome...')
 
     co = ChromiumOptions()
@@ -79,6 +79,8 @@ def capture_audio_url(short_url):
     )
 
     page = None
+    audio_url = None
+    cover_url = None
     try:
         page = ChromiumPage(co)
 
@@ -111,23 +113,28 @@ def capture_audio_url(short_url):
             except Exception:
                 continue
 
-        # 方法1：从页面 HTML 源码中提取音频链接
+        # 提取音频 URL
         audio_url = extract_from_html(page)
-        if audio_url:
-            return audio_url
+        if not audio_url:
+            audio_url = extract_from_js(page)
+        if not audio_url:
+            audio_url = extract_from_audio_tags(page)
 
-        # 方法2：从 JS 变量中提取
-        audio_url = extract_from_js(page)
-        if audio_url:
-            return audio_url
+        # 提取封面 URL
+        html = page.html
+        cover_match = re.search(r'"url_cover"\s*:\s*\{[^}]+\}', html)
+        if cover_match:
+            try:
+                cover_data = json.loads(cover_match.group(0).replace('\\u002F', '/').replace('"url_cover":', ''))
+                uri = cover_data.get('uri', '')
+                urls = cover_data.get('urls', [])
+                if uri and urls:
+                    cover_url = urls[0] + uri + '~c5_375x375.jpg'
+                    print(f'[提取] 封面 URL: {cover_url[:120]}...')
+            except Exception:
+                pass
 
-        # 方法3：检查 <audio> / <source> 标签
-        audio_url = extract_from_audio_tags(page)
-        if audio_url:
-            return audio_url
-
-        print('[浏览器] 未能从页面中提取到音频链接')
-        return None
+        return audio_url, cover_url
 
     finally:
         if page:
@@ -311,7 +318,7 @@ def main():
     song_name, short_url = parse_input(input_text)
 
     # 2. 捕获音频 URL
-    audio_url = capture_audio_url(short_url)
+    audio_url, cover_url = capture_audio_url(short_url)
     if not audio_url:
         print('[错误] 未能获取到音频文件 URL，可能原因：')
         print('  - 页面需要登录或有其他限制')
@@ -326,6 +333,7 @@ def main():
     temp_dir = tempfile.gettempdir()
     m4a_path = os.path.join(temp_dir, f'temp_{timestamp}.m4a')
     mp3_path = os.path.join(os.getcwd(), f'{safe_name}.mp3')
+    cover_path = os.path.join(os.getcwd(), f'{safe_name}.jpg')
 
     try:
         download_file(audio_url, m4a_path)
@@ -333,8 +341,16 @@ def main():
         # 4. 转换为 mp3
         convert_to_mp3(m4a_path, mp3_path)
         print(f'\n[完成] MP3 已保存: {mp3_path}')
+
+        # 5. 下载封面
+        if cover_url:
+            try:
+                download_file(cover_url, cover_path)
+                print(f'[完成] 封面已保存: {cover_path}')
+            except Exception as e:
+                print(f'[警告] 封面下载失败: {e}')
     finally:
-        # 5. 清理临时文件
+        # 清理临时文件
         if os.path.exists(m4a_path):
             os.remove(m4a_path)
             print(f'[清理] 已删除临时文件: {m4a_path}')

@@ -84,13 +84,15 @@ HTML_PAGE = r"""
   .history h3 { color: rgba(255,255,255,0.6); font-size: 13px; margin-bottom: 10px; }
   .history-list { max-height: 200px; overflow-y: auto; }
   .history-item {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center;
     padding: 10px 14px; background: rgba(255,255,255,0.04); border-radius: 8px;
     margin-bottom: 6px; transition: background 0.2s;
   }
   .history-item:hover { background: rgba(255,255,255,0.08); }
-  .history-item .name { color: rgba(255,255,255,0.8); font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .history-item .size { color: rgba(255,255,255,0.4); font-size: 12px; margin-left: 12px; white-space: nowrap; }
+  .history-item .cover { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; margin-right: 12px; flex-shrink: 0; background: rgba(255,255,255,0.1); }
+  .history-item .info { flex: 1; min-width: 0; }
+  .history-item .name { color: rgba(255,255,255,0.8); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-item .size { color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 2px; }
   .empty-hint { color: rgba(255,255,255,0.25); font-size: 13px; text-align: center; padding: 20px; }
 </style>
 </head>
@@ -139,7 +141,9 @@ async function startDownload() {
     const data = await resp.json();
 
     if (data.success) {
-      showStatus('success', '下载完成: ' + data.filename + ' (' + data.size + ')');
+      let msg = '下载完成: ' + data.filename + ' (' + data.size + ')';
+      if (data.cover) msg += ' + 封面图';
+      showStatus('success', msg);
       loadHistory();
     } else {
       showStatus('error', data.error || '下载失败');
@@ -168,12 +172,18 @@ async function loadHistory() {
       list.innerHTML = '<div class="empty-hint">暂无下载记录</div>';
       return;
     }
-    list.innerHTML = files.map(f =>
-      '<div class="history-item">' +
-        '<span class="name">' + f.name + '</span>' +
-        '<span class="size">' + f.size + '</span>' +
-      '</div>'
-    ).join('');
+    list.innerHTML = files.map(f => {
+      const coverHtml = f.cover
+        ? '<img class="cover" src="/downloads/' + encodeURIComponent(f.cover) + '" onerror="this.style.display=\'none\'">'
+        : '<div class="cover"></div>';
+      return '<div class="history-item">' +
+        coverHtml +
+        '<div class="info">' +
+          '<div class="name">' + f.name + '</div>' +
+          '<div class="size">' + f.size + '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
   } catch(e) {}
 }
 
@@ -215,6 +225,8 @@ def capture_audio_url(short_url):
     )
 
     page = None
+    audio_url = None
+    cover_url = None
     try:
         page = ChromiumPage(co)
         page.get(short_url)
@@ -236,8 +248,9 @@ def capture_audio_url(short_url):
             except Exception:
                 continue
 
-        # HTML 正则提取
         html = page.html
+
+        # 提取音频 URL
         for pattern in [
             r'(https?://[^\s"\'<>\\]+\.m4a[^\s"\'<>\\]*)',
             r'(https?://[^\s"\'<>\\]+\.mp3[^\s"\'<>\\]*)',
@@ -246,20 +259,34 @@ def capture_audio_url(short_url):
         ]:
             matches = re.findall(pattern, html)
             if matches:
-                return matches[0]
+                audio_url = matches[0]
+                break
 
-        # <audio>/<source> 标签
-        for tag in ['css:audio', 'css:source']:
+        if not audio_url:
+            for tag in ['css:audio', 'css:source']:
+                try:
+                    el = page.ele(tag)
+                    if el:
+                        src = el.attr('src')
+                        if src and src.startswith('http'):
+                            audio_url = src
+                            break
+                except Exception:
+                    continue
+
+        # 提取封面 URL - 从 url_cover 数据中构建
+        cover_match = re.search(r'"url_cover"\s*:\s*\{[^}]+\}', html)
+        if cover_match:
             try:
-                el = page.ele(tag)
-                if el:
-                    src = el.attr('src')
-                    if src and src.startswith('http'):
-                        return src
+                cover_data = json.loads(cover_match.group(0).replace('\\u002F', '/').replace('"url_cover":', ''))
+                uri = cover_data.get('uri', '')
+                urls = cover_data.get('urls', [])
+                if uri and urls:
+                    cover_url = urls[0] + uri + '~c5_375x375.jpg'
             except Exception:
-                continue
+                pass
 
-        return None
+        return audio_url, cover_url
     finally:
         if page:
             try:
@@ -316,7 +343,7 @@ def do_download(link_text):
     if err:
         raise ValueError(err)
 
-    audio_url = capture_audio_url(short_url)
+    audio_url, cover_url = capture_audio_url(short_url)
     if not audio_url:
         raise RuntimeError('未能获取到音频文件 URL')
 
@@ -325,15 +352,25 @@ def do_download(link_text):
     temp_dir = tempfile.gettempdir()
     m4a_path = os.path.join(temp_dir, f'temp_{timestamp}.m4a')
     mp3_path = os.path.join(DOWNLOAD_DIR, f'{safe_name}.mp3')
+    cover_path = os.path.join(DOWNLOAD_DIR, f'{safe_name}.jpg')
 
     try:
         download_file(audio_url, m4a_path)
         convert_to_mp3(m4a_path, mp3_path)
+        # 下载封面
+        if cover_url:
+            try:
+                download_file(cover_url, cover_path)
+            except Exception:
+                pass
     finally:
         if os.path.exists(m4a_path):
             os.remove(m4a_path)
 
-    return safe_name + '.mp3'
+    result = {'mp3': safe_name + '.mp3'}
+    if cover_url and os.path.exists(cover_path):
+        result['cover'] = safe_name + '.jpg'
+    return result
 
 
 def format_size(size_bytes):
@@ -358,10 +395,13 @@ def api_download():
         return jsonify(success=False, error='请输入分享链接')
 
     try:
-        filename = do_download(link)
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-        size = os.path.getsize(filepath)
-        return jsonify(success=True, filename=filename, size=format_size(size))
+        result = do_download(link)
+        mp3_path = os.path.join(DOWNLOAD_DIR, result['mp3'])
+        size = os.path.getsize(mp3_path)
+        resp = {'success': True, 'filename': result['mp3'], 'size': format_size(size)}
+        if 'cover' in result:
+            resp['cover'] = result['cover']
+        return jsonify(resp)
     except Exception as e:
         return jsonify(success=False, error=str(e))
 
@@ -373,8 +413,16 @@ def api_history():
         for f in sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)), reverse=True):
             if f.endswith('.mp3'):
                 size = os.path.getsize(os.path.join(DOWNLOAD_DIR, f))
-                files.append({'name': f, 'size': format_size(size)})
+                name = f[:-4]  # 去掉 .mp3
+                cover = name + '.jpg'
+                has_cover = os.path.exists(os.path.join(DOWNLOAD_DIR, cover))
+                files.append({'name': f, 'size': format_size(size), 'cover': cover if has_cover else None})
     return jsonify(files)
+
+
+@app.route('/downloads/<path:filename>')
+def serve_download(filename):
+    return send_from_directory(DOWNLOAD_DIR, filename)
 
 
 if __name__ == '__main__':
