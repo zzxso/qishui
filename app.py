@@ -143,6 +143,7 @@ async function startDownload() {
     if (data.success) {
       let msg = '下载完成: ' + data.filename + ' (' + data.size + ')';
       if (data.cover) msg += ' + 封面图';
+      if (data.lyrics) msg += ' + 歌词(' + data.lyrics_count + '行)';
       showStatus('success', msg);
       loadHistory();
     } else {
@@ -212,6 +213,42 @@ def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '', name)
 
 
+def fetch_ssr_lyrics(track_id):
+    """通过 track_id 获取 SSR 渲染的歌词"""
+    url = f"https://music.douyin.com/qishui/share/track?track_id={track_id}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            lyrics = re.findall(r'<div class="ssr-lyric">(.*?)</div>', resp.text)
+            return [l.strip() for l in lyrics if l.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def save_lyrics_as_lrc(lyrics, output_path):
+    """将歌词保存为 LRC 格式"""
+    if not lyrics:
+        return False
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('[ti:]\n')
+        f.write('[ar:]\n')
+        f.write('[al:]\n')
+        f.write('[by:Qishui Downloader]\n')
+        f.write('\n')
+        # 无时间戳的歌词，每行间隔3秒
+        for i, line in enumerate(lyrics):
+            minutes = (i * 3) // 60
+            seconds = (i * 3) % 60
+            f.write(f'[{minutes:02d}:{seconds:02d}.00]{line}\n')
+    return True
+
+
 def capture_audio_url(short_url):
     co = ChromiumOptions()
     co.headless()
@@ -227,10 +264,18 @@ def capture_audio_url(short_url):
     page = None
     audio_url = None
     cover_url = None
+    lyrics = []
     try:
         page = ChromiumPage(co)
         page.get(short_url)
         time.sleep(10)
+
+        # 从当前URL中提取 track_id
+        current_url = page.url
+        track_id = None
+        tid_match = re.search(r'track_id=(\d+)', current_url)
+        if tid_match:
+            track_id = tid_match.group(1)
 
         play_selectors = [
             'css:[class*="play"]', 'css:[class*="Play"]',
@@ -286,7 +331,11 @@ def capture_audio_url(short_url):
             except Exception:
                 pass
 
-        return audio_url, cover_url
+        # 如果有 track_id，尝试获取 SSR 歌词
+        if track_id:
+            lyrics = fetch_ssr_lyrics(track_id)
+
+        return audio_url, cover_url, lyrics
     finally:
         if page:
             try:
@@ -343,7 +392,7 @@ def do_download(link_text):
     if err:
         raise ValueError(err)
 
-    audio_url, cover_url = capture_audio_url(short_url)
+    audio_url, cover_url, lyrics = capture_audio_url(short_url)
     if not audio_url:
         raise RuntimeError('未能获取到音频文件 URL')
 
@@ -353,6 +402,7 @@ def do_download(link_text):
     m4a_path = os.path.join(temp_dir, f'temp_{timestamp}.m4a')
     mp3_path = os.path.join(DOWNLOAD_DIR, f'{safe_name}.mp3')
     cover_path = os.path.join(DOWNLOAD_DIR, f'{safe_name}.jpg')
+    lrc_path = os.path.join(DOWNLOAD_DIR, f'{safe_name}.lrc')
 
     try:
         download_file(audio_url, m4a_path)
@@ -367,9 +417,16 @@ def do_download(link_text):
         if os.path.exists(m4a_path):
             os.remove(m4a_path)
 
+    # 保存歌词
+    if lyrics:
+        save_lyrics_as_lrc(lyrics, lrc_path)
+
     result = {'mp3': safe_name + '.mp3'}
     if cover_url and os.path.exists(cover_path):
         result['cover'] = safe_name + '.jpg'
+    if lyrics:
+        result['lyrics'] = safe_name + '.lrc'
+        result['lyrics_count'] = len(lyrics)
     return result
 
 
@@ -401,6 +458,9 @@ def api_download():
         resp = {'success': True, 'filename': result['mp3'], 'size': format_size(size)}
         if 'cover' in result:
             resp['cover'] = result['cover']
+        if 'lyrics' in result:
+            resp['lyrics'] = result['lyrics']
+            resp['lyrics_count'] = result['lyrics_count']
         return jsonify(resp)
     except Exception as e:
         return jsonify(success=False, error=str(e))
