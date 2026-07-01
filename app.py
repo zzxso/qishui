@@ -214,108 +214,71 @@ def sanitize_filename(name):
 
 
 def fetch_timed_lyrics(track_id):
-    """通过 CDP 获取带时间戳的歌词"""
-    import subprocess
-    import websocket
-
-    chrome_path = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    debug_port = 9280
-    user_data_dir = os.path.join(tempfile.gettempdir(), f'qishui_lyrics_{int(time.time())}')
-
-    # 启动 Chrome
-    chrome = subprocess.Popen([
-        chrome_path,
-        f'--remote-debugging-port={debug_port}',
-        f'--user-data-dir={user_data_dir}',
-        '--remote-allow-origins=*',
-        '--no-first-run', '--no-default-browser-check',
-        '--disable-gpu',
-        '--window-size=1280,720',
-    ])
-    time.sleep(3)
-
+    """通过 DrissionPage 获取带时间戳的歌词"""
+    page = None
     try:
-        # 连接
-        print('[歌词] 连接 Chrome CDP...')
-        resp = requests.get(f'http://localhost:{debug_port}/json/version', timeout=5)
-        if resp.status_code != 200:
-            print(f'[歌词] CDP 连接失败: {resp.status_code}')
-            return []
+        co = ChromiumOptions()
+        co.set_argument('--disable-gpu')
+        co.set_argument('--no-sandbox')
+        co.set_argument('--window-size=1280,720')
+        co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
 
-        # 打开歌曲页
+        page = ChromiumPage(co)
         url = f'https://music.douyin.com/qishui/share/track?track_id={track_id}'
-        resp = requests.put(f'http://localhost:{debug_port}/json/new?{url}', timeout=10)
-        target = resp.json()
-        ws_url = target.get('webSocketDebuggerUrl', '')
-        print(f'[歌词] 标签页已打开，等待加载...')
+        page.get(url)
+        time.sleep(20)
 
-        # 等待加载
-        time.sleep(25)
-
-        # 通过 CDP 执行 JS 搜索歌词
-        ws = websocket.create_connection(ws_url, timeout=30)
-        msg_id = int(time.time() * 1000) % 100000
-        js_code = """
-        (function() {
-            var allElements = document.querySelectorAll('*');
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var keys = Object.keys(el);
-                for (var j = 0; j < keys.length; j++) {
-                    if (keys[j].startsWith('__reactFiber') || keys[j].startsWith('__reactInternalInstance')) {
-                        var fiber = el[keys[j]];
-                        var current = fiber;
-                        var depth = 0;
-                        while (current && depth < 50) {
-                            try {
-                                if (current.memoizedState) {
-                                    var s = current.memoizedState;
-                                    var si = 0;
-                                    while (s && si < 20) {
-                                        if (s.memoizedState && s.memoizedState.lyrics && s.memoizedState.lyrics.sentences && s.memoizedState.lyrics.sentences.length > 0) {
-                                            return JSON.stringify(s.memoizedState.lyrics);
-                                        }
-                                        s = s.next;
-                                        si++;
-                                    }
+        # 从 React Fiber 中提取歌词
+        result = page.run_js("""
+        var el = document.querySelector('[class*="lyric"]');
+        if (el) {
+            var key = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber'); });
+            if (key) {
+                var fiber = el[key];
+                var cur = fiber;
+                var d = 0;
+                while (cur && d < 30) {
+                    if (cur.memoizedState) {
+                        var s = cur.memoizedState;
+                        var i = 0;
+                        while (s && i < 20) {
+                            if (s.memoizedState && s.memoizedState.lyrics && s.memoizedState.lyrics.sentences) {
+                                var sentences = s.memoizedState.lyrics.sentences;
+                                var out = [];
+                                for (var j = 0; j < sentences.length; j++) {
+                                    out.push({text: sentences[j].text, startMs: sentences[j].startMs, endMs: sentences[j].endMs});
                                 }
-                            } catch(e) {}
-                            current = current.return;
-                            depth++;
+                                return JSON.stringify(out);
+                            }
+                            s = s.next;
+                            i++;
                         }
                     }
+                    cur = cur.return;
+                    d++;
                 }
             }
-            return JSON.stringify({error: 'not found'});
-        })()
-        """
-        ws.send(json.dumps({'id': msg_id, 'method': 'Runtime.evaluate', 'params': {
-            'expression': js_code, 'returnByValue': True
-        }}))
-        while True:
-            result = json.loads(ws.recv())
-            if result.get('id') == msg_id:
-                break
-        ws.close()
+        }
+        return '[]';
+        """)
 
-        value = result.get('result', {}).get('result', {}).get('value', '')
-        data = json.loads(value)
-        if 'sentences' in data:
-            print(f'[歌词] 获取到 {len(data["sentences"])} 行歌词')
-            return data['sentences']
-        print(f'[歌词] 未找到歌词: {str(data)[:100]}')
+        if result:
+            sentences = json.loads(result)
+            if sentences:
+                print(f'[歌词] 获取到 {len(sentences)} 行歌词')
+                return sentences
+
         return []
 
     except Exception as e:
         print(f'[歌词] 获取失败: {e}')
         return []
     finally:
-        # 关闭标签页和 Chrome
-        try:
-            requests.get(f'http://localhost:{debug_port}/json/close/{target.get("id")}', timeout=3)
-        except:
-            pass
-        chrome.terminate()
+        if page:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
 
 def save_lyrics_as_lrc(lyrics, output_path):
@@ -426,7 +389,14 @@ def capture_audio_url(short_url):
 
         # 如果有 track_id，尝试获取带时间戳的歌词
         if track_id:
+            with open(os.path.join(DOWNLOAD_DIR, 'debug.log'), 'a', encoding='utf-8') as f:
+                f.write(f'[{time.time()}] track_id={track_id}\n')
             lyrics = fetch_timed_lyrics(track_id)
+            with open(os.path.join(DOWNLOAD_DIR, 'debug.log'), 'a', encoding='utf-8') as f:
+                f.write(f'[{time.time()}] lyrics={len(lyrics)} lines\n')
+        else:
+            with open(os.path.join(DOWNLOAD_DIR, 'debug.log'), 'a', encoding='utf-8') as f:
+                f.write(f'[{time.time()}] no track_id, current_url={page.url}\n')
 
         return audio_url, cover_url, lyrics
     finally:
