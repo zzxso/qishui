@@ -229,7 +229,7 @@ def fetch_timed_lyrics(track_id):
         f'--user-data-dir={user_data_dir}',
         '--remote-allow-origins=*',
         '--no-first-run', '--no-default-browser-check',
-        '--headless=new', '--disable-gpu',
+        '--disable-gpu',
         '--window-size=1280,720',
     ])
     time.sleep(3)
@@ -270,7 +270,6 @@ def fetch_timed_lyrics(track_id):
                                     var si = 0;
                                     while (s && si < 20) {
                                         if (s.memoizedState && s.memoizedState.lyrics && s.memoizedState.lyrics.sentences && s.memoizedState.lyrics.sentences.length > 0) {
-                                            ws.close && ws.close();
                                             return JSON.stringify(s.memoizedState.lyrics);
                                         }
                                         s = s.next;

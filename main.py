@@ -78,7 +78,7 @@ def fetch_timed_lyrics(track_id):
         f'--user-data-dir={user_data_dir}',
         '--remote-allow-origins=*',
         '--no-first-run', '--no-default-browser-check',
-        '--headless=new', '--disable-gpu',
+        '--disable-gpu',
         '--window-size=1280,720',
     ])
     time.sleep(3)
