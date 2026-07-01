@@ -219,8 +219,8 @@ def fetch_timed_lyrics(track_id):
     import websocket
 
     chrome_path = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    debug_port = 9223
-    user_data_dir = os.path.join(tempfile.gettempdir(), 'qishui_lyrics_debug')
+    debug_port = 9280
+    user_data_dir = os.path.join(tempfile.gettempdir(), f'qishui_lyrics_{int(time.time())}')
 
     # 启动 Chrome
     chrome = subprocess.Popen([
@@ -236,8 +236,10 @@ def fetch_timed_lyrics(track_id):
 
     try:
         # 连接
+        print('[歌词] 连接 Chrome CDP...')
         resp = requests.get(f'http://localhost:{debug_port}/json/version', timeout=5)
         if resp.status_code != 200:
+            print(f'[歌词] CDP 连接失败: {resp.status_code}')
             return []
 
         # 打开歌曲页
@@ -245,9 +247,10 @@ def fetch_timed_lyrics(track_id):
         resp = requests.put(f'http://localhost:{debug_port}/json/new?{url}', timeout=10)
         target = resp.json()
         ws_url = target.get('webSocketDebuggerUrl', '')
+        print(f'[歌词] 标签页已打开，等待加载...')
 
         # 等待加载
-        time.sleep(20)
+        time.sleep(25)
 
         # 通过 CDP 执行 JS 搜索歌词
         ws = websocket.create_connection(ws_url, timeout=30)
@@ -298,10 +301,13 @@ def fetch_timed_lyrics(track_id):
         value = result.get('result', {}).get('result', {}).get('value', '')
         data = json.loads(value)
         if 'sentences' in data:
+            print(f'[歌词] 获取到 {len(data["sentences"])} 行歌词')
             return data['sentences']
+        print(f'[歌词] 未找到歌词: {str(data)[:100]}')
         return []
 
-    except Exception:
+    except Exception as e:
+        print(f'[歌词] 获取失败: {e}')
         return []
     finally:
         # 关闭标签页和 Chrome

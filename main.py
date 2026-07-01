@@ -69,8 +69,8 @@ def fetch_timed_lyrics(track_id):
     import websocket
 
     chrome_path = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    debug_port = 9224
-    user_data_dir = os.path.join(tempfile.gettempdir(), 'qishui_lyrics_debug')
+    debug_port = 9281
+    user_data_dir = os.path.join(tempfile.gettempdir(), f'qishui_lyrics_{int(time.time())}')
 
     chrome = subprocess.Popen([
         chrome_path,
