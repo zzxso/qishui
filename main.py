@@ -63,22 +63,97 @@ def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '', name)
 
 
-def fetch_ssr_lyrics(track_id):
-    """通过 track_id 获取 SSR 渲染的歌词"""
-    url = f"https://music.douyin.com/qishui/share/track?track_id={track_id}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-    }
+def fetch_timed_lyrics(track_id):
+    """通过 CDP 获取带时间戳的歌词"""
+    import subprocess
+    import websocket
+
+    chrome_path = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    debug_port = 9224
+    user_data_dir = os.path.join(tempfile.gettempdir(), 'qishui_lyrics_debug')
+
+    chrome = subprocess.Popen([
+        chrome_path,
+        f'--remote-debugging-port={debug_port}',
+        f'--user-data-dir={user_data_dir}',
+        '--remote-allow-origins=*',
+        '--no-first-run', '--no-default-browser-check',
+        '--headless=new', '--disable-gpu',
+        '--window-size=1280,720',
+    ])
+    time.sleep(3)
+
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            lyrics = re.findall(r'<div class="ssr-lyric">(.*?)</div>', resp.text)
-            return [l.strip() for l in lyrics if l.strip()]
+        resp = requests.get(f'http://localhost:{debug_port}/json/version', timeout=5)
+        if resp.status_code != 200:
+            return []
+
+        url = f'https://music.douyin.com/qishui/share/track?track_id={track_id}'
+        resp = requests.put(f'http://localhost:{debug_port}/json/new?{url}', timeout=10)
+        target = resp.json()
+        ws_url = target.get('webSocketDebuggerUrl', '')
+
+        time.sleep(20)
+
+        ws = websocket.create_connection(ws_url, timeout=30)
+        msg_id = int(time.time() * 1000) % 100000
+        js_code = """
+        (function() {
+            var allElements = document.querySelectorAll('*');
+            for (var i = 0; i < allElements.length; i++) {
+                var el = allElements[i];
+                var keys = Object.keys(el);
+                for (var j = 0; j < keys.length; j++) {
+                    if (keys[j].startsWith('__reactFiber') || keys[j].startsWith('__reactInternalInstance')) {
+                        var fiber = el[keys[j]];
+                        var current = fiber;
+                        var depth = 0;
+                        while (current && depth < 50) {
+                            try {
+                                if (current.memoizedState) {
+                                    var s = current.memoizedState;
+                                    var si = 0;
+                                    while (s && si < 20) {
+                                        if (s.memoizedState && s.memoizedState.lyrics && s.memoizedState.lyrics.sentences && s.memoizedState.lyrics.sentences.length > 0) {
+                                            return JSON.stringify(s.memoizedState.lyrics);
+                                        }
+                                        s = s.next;
+                                        si++;
+                                    }
+                                }
+                            } catch(e) {}
+                            current = current.return;
+                            depth++;
+                        }
+                    }
+                }
+            }
+            return JSON.stringify({error: 'not found'});
+        })()
+        """
+        ws.send(json.dumps({'id': msg_id, 'method': 'Runtime.evaluate', 'params': {
+            'expression': js_code, 'returnByValue': True
+        }}))
+        while True:
+            result = json.loads(ws.recv())
+            if result.get('id') == msg_id:
+                break
+        ws.close()
+
+        value = result.get('result', {}).get('result', {}).get('value', '')
+        data = json.loads(value)
+        if 'sentences' in data:
+            return data['sentences']
+        return []
+
     except Exception:
-        pass
-    return []
+        return []
+    finally:
+        try:
+            requests.get(f'http://localhost:{debug_port}/json/close/{target.get("id")}', timeout=3)
+        except:
+            pass
+        chrome.terminate()
 
 
 def save_lyrics_as_lrc(lyrics, output_path):
@@ -87,10 +162,20 @@ def save_lyrics_as_lrc(lyrics, output_path):
         return False
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write('[ti:]\n[ar:]\n[al:]\n[by:Qishui Downloader]\n\n')
-        for i, line in enumerate(lyrics):
-            minutes = (i * 3) // 60
-            seconds = (i * 3) % 60
-            f.write(f'[{minutes:02d}:{seconds:02d}.00]{line}\n')
+        for line in lyrics:
+            if isinstance(line, dict):
+                text = line.get('text', '')
+                start_ms = line.get('startMs', line.get('start', 0))
+                if start_ms > 1000:
+                    total_seconds = start_ms / 1000
+                else:
+                    total_seconds = start_ms
+                minutes = int(total_seconds) // 60
+                seconds = total_seconds % 60
+                f.write(f'[{minutes:02d}:{seconds:05.2f}]{text}\n')
+            else:
+                f.write(f'{line}\n')
+    return True
     return True
 
 
@@ -173,10 +258,10 @@ def capture_audio_url(short_url):
             except Exception:
                 pass
 
-        # 获取 SSR 歌词
+        # 获取带时间戳的歌词
         if track_id:
             print(f'[歌词] track_id={track_id}，正在获取歌词...')
-            lyrics = fetch_ssr_lyrics(track_id)
+            lyrics = fetch_timed_lyrics(track_id)
             if lyrics:
                 print(f'[歌词] 获取到 {len(lyrics)} 行歌词')
             else:
